@@ -1,0 +1,53 @@
+{
+  "admin_setting": {
+    "description": "管理员设置",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "插件开关",
+        "type": "bool",
+        "hint": "插件总开关，默认打开，若关闭则会阻断所有功能",
+        "default": true
+      },
+      "API key": {
+        "description": "API key",
+        "type": "list",
+        "hint": "Codeforces API key 列表，留空表示不配置"
+      },
+      "Admin ID": {
+        "description": "管理员 ID",
+        "type": "list",
+        "hint": "管理员列表，仅列表中的 ID 才可调用管理员指令，留空表示不配置"
+      }
+    }
+  },
+  "contest_setting": {
+    "description": "比赛推送设置",
+    "type": "object",
+    "contest_number": {
+      "description": "单次查询获取的比赛数量",
+      "type": "int",
+      "hint": "表示查询比赛列表时，最多返回的比赛数量，默认为 5",
+      "slider": {
+        "min": 1,
+        "max": 10,
+        "step": 1
+      },
+      "default": 5
+    },
+    "contest_push_time": {
+      "description": "每日定时推送 Codeforces 比赛信息"
+    }
+  },
+  "loop_time": {
+    "description": "插件轮询时间",
+    "type": "int",
+    "hint": "表示两次自动查询提交记录的间隔，单位为秒，一般推荐 300 - 600",
+    "slider": {
+      "min": 100,
+      "max": 3600,
+      "step": 100
+    },
+    "default": 600
+  }
+}
