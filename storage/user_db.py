@@ -81,6 +81,9 @@ class DataStorageHandler:
 
                 CREATE INDEX IF NOT EXISTS idx_bind_handle
                 ON cf_bindings(cf_handle);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_bind_group_handle
+                ON cf_bindings(group_id, cf_handle COLLATE NOCASE);
                 """
             )
 
@@ -199,8 +202,12 @@ class DataStorageHandler:
         with self._lock:
             # 通过键值对获取对应绑定信息
             current = self._bindings.get((user_id, group_id))
-            # 若信息不为空，则记录指纹，否则置为空
-            last_ac_fingerprint = current.last_ac_fingerprint if current else None
+            # 若绑定的是同一个 handle，则保留指纹；若切换账号，则重置指纹
+            last_ac_fingerprint = (
+                current.last_ac_fingerprint
+                if current is not None and current.cf_handle.casefold() == cf_handle.casefold()
+                else None
+            )
             """
             实际解析为
             broadcast_enabled = (
@@ -242,7 +249,8 @@ class DataStorageHandler:
                 ON CONFLICT(user_id, group_id) DO UPDATE SET
                     cf_handle = excluded.cf_handle,
                     enable_broadcast = excluded.enable_broadcast,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    last_ac_fingerprint = excluded.last_ac_fingerprint
                 """,
                 (
                     user_id,
@@ -467,6 +475,30 @@ class DataStorageHandler:
             user_id,
             group_id,
             fingerprint,
+        )
+    
+    def get_group_binding_by_handle(self, group_id, cf_handle):
+        """线程方法：查询 cf handle 是否被唯一绑定"""
+        group_id = self._normalize_id(group_id)
+        handle_key = self._normalize_handle(cf_handle).casefold()
+        with self._lock:
+            keys = self._handle_index.get(handle_key, set()).copy()
+            for key in keys:
+                binding = self._bindings.get(key)
+                if binding is not None and binding.group_id == group_id:
+                    return binding
+        return None
+    
+    async def aget_group_binding_by_handle(
+        self,
+        group_id: str | int,
+        cf_handle: str | int,
+    ) -> CodeforcesBinding | None:
+        """异步 IO：查询绑定唯一性"""
+        return await asyncio.to_thread(
+            self.get_group_binding_by_handle,
+            group_id,
+            cf_handle
         )
 
     def close(self) -> None:

@@ -124,7 +124,7 @@ class ContestInfoHandler:
             contests=result_contest_data,
         )
 
-    async def ContestInfoRequest(self, contest_number: int):
+    async def ContestInfoRequest(self, contest_number: int) -> CodeforcesContestInfoResult | None:
         """查询比赛信息，并将加工后的消息返回给 main.py"""
         # 创建使用 _request_contest_info 方法的线程
         return await asyncio.to_thread(self._request_contest_info, contest_number)
