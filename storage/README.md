@@ -10,6 +10,13 @@
 
 模块注重线程安全和冲突避免，适合日常中小型并发场景，并发量过大时可能会出现线程池枯竭、请求积压等情况，但可以满足一般的 QQ 群场景。
 
+#### 模块实例化
+
+在 `main.py` 中实例化为 `self.user_db_handler`，初始化如下
+```python
+self.user_db_handler = DataStorageHandler(db_path=self._build_user_db_path())
+```
+
 #### 数据结构
 
 规定模块返回的用户信息模式

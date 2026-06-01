@@ -28,16 +28,16 @@
     - `legendary grandmaster`
     - `unrated` 使用灰色主题。
 
-### 2. 绑定 Codeforces 用户
+### 2. 绑定 Codeforces 用户 ✅
 
 支持群成员在不同群聊中绑定自己的 Codeforces 账号，绑定关系以群为单位隔离
 
 #### 设计目标
 
-- 支持同一 QQ 用户在不同群绑定不同的 `cf_handle`
-- 支持快速查询绑定信息
-- 支持插件加载 / 重载后恢复绑定数据
-- 支持用户单独控制是否参与过题播报
+- 支持同一 QQ 用户在不同群绑定不同的 `cf_handle` ✅
+- 支持快速查询绑定信息 ✅
+- 支持插件加载 / 重载后恢复绑定数据 ✅
+- 支持用户单独控制是否参与过题播报 ✅
 
 #### 存储方案
 
@@ -45,9 +45,9 @@
 
 运行时维护一份内存缓存，用于提升查询和轮询效率
 
-- 插件启动或重载时，从数据库加载绑定关系到内存
-- 绑定、解绑、修改配置时，同步更新内存状态
-- 关键变更立即写入数据库，避免因异常退出造成数据丢失
+- 插件启动或重载时，从数据库加载绑定关系到内存 ✅
+- 绑定、解绑、修改配置时，同步更新内存状态 ✅
+- 关键变更立即写入数据库，避免因异常退出造成数据丢失 ✅
 - 对于非关键统计类数据，可根据需要采用定时批量写回策略
 
 #### 表结构设计
@@ -77,6 +77,9 @@ ON cf_bindings(group_id);
 
 CREATE INDEX IF NOT EXISTS idx_bind_handle
 ON cf_bindings(cf_handle);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bind_group_handle
+ON cf_bindings(group_id, cf_handle COLLATE NOCASE);
 ```
 
 说明：
@@ -84,6 +87,7 @@ ON cf_bindings(cf_handle);
 - `(user_id, group_id)` 作为主键，可以唯一确定某个用户在某个群中的绑定关系
 - 创建 `group_id` 单列索引，按群获取全部绑定用户
 - 创建 `cf_handle` 索引，根据 `cf_handle` 反查用户 ID
+- 创建 `bind_group_handle` 索引，避免同群不同用户绑定同一 ID
 
 ### 3. 近期比赛推送
 
@@ -98,7 +102,7 @@ ON cf_bindings(cf_handle);
 - 支持配置赛前提醒时间
 - 将比赛信息渲染为图片后发送
 
-#### 推送内容
+#### 推送内容 ✅
 
 计划包含：
 

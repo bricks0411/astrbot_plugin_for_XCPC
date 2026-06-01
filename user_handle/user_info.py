@@ -7,6 +7,7 @@ from .models import CodeforcesUserInfoResult, CodeforcesUserProfile
 class UserInfoHandler:
     API_URL = "https://codeforces.com/api/user.info"
     REQUEST_TIMEOUT = 10
+    USER_AGENT = "astrbot-plugin-for-xcpc/0.0.1"
 
     def __init__(self):
         pass
@@ -32,7 +33,7 @@ class UserInfoHandler:
         )
 
     def _request_user_info(self, user_handle: str) -> CodeforcesUserInfoResult:
-        """线程方法：向 codeforces.com 发送请求并接收数据"""
+        """线程方法：向 codeforces.com 发送请求并接收用户基本信息"""
         handle = user_handle.strip()
         # 若传入的 user_handle 为空，则抛出错误并返回对应信息
         # 这个 corner case 之前已经处理过，正常情况下，这一块不会执行
@@ -48,14 +49,14 @@ class UserInfoHandler:
                 self.API_URL,
                 params={"handles": handle},
                 timeout=self.REQUEST_TIMEOUT,
-                headers={"User-Agent": "astrbot-plugin-for-xcpc/0.0.1"},
+                headers={"User-Agent": self.USER_AGENT},
             )
             response.raise_for_status()
             payload = response.json()
         except requests.exceptions.Timeout:
             return CodeforcesUserInfoResult(
                 ok=False,
-                message="Codeforces.com 没有在 10000ms 内返回数据，请求超时",
+                message="codeforces.com 没有在 10000ms 内返回数据，请求超时",
             )
         # request 异常捕获：使用 RequestException 基类捕获可能出现的所有异常，并将其统一为请求错误，并用 exc 展示
         except requests.exceptions.RequestException as exc:
@@ -66,7 +67,7 @@ class UserInfoHandler:
         except ValueError:
             return CodeforcesUserInfoResult(
                 ok=False,
-                message="获取到非法 / 不被支持的 json 文件",
+                message="获取到非法 / 不被支持的 JSON 文件",
             )
         
         # 请求成功，但状态不 OK，则读取 comment 栏并返回 comment 中的错误信息
@@ -82,7 +83,7 @@ class UserInfoHandler:
         if not isinstance(result, list) or not result:
             return CodeforcesUserInfoResult(
                 ok=False,
-                message="收到 Codeforces 返回的空列表",
+                message="收到 Codeforces 返回的空列表 / 非列表文件",
             )
 
         # 返回数据中没有 handle 栏

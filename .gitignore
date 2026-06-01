@@ -208,3 +208,6 @@ __marimo__/
 
 # pycache
 __pycache__/
+
+# tests
+tests/
