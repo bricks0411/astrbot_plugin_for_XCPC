@@ -13,6 +13,7 @@ from astrbot.api.message_components import At, Plain, BaseMessageComponent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .user_handle.user_info import UserInfoHandler
+from .user_status.user_status import UserStatusHandler
 from .contests.contest_info import ContestInfoHandler
 from .storage.user_db import DataStorageHandler
 
@@ -45,6 +46,7 @@ class PluginForXCPC(Star):
 
         # 模块类实例化
         self.user_info_handler = UserInfoHandler()
+        self.user_status_handler = UserStatusHandler()
         self.contest_info_handler = ContestInfoHandler()
         self.user_db_handler = DataStorageHandler(db_path=self._build_user_db_path())
         self.hour_contest = 0
