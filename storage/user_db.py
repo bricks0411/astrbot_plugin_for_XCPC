@@ -32,10 +32,10 @@ class DataStorageHandler:
         # 可重入锁，使一个线程可以多次获取同一个锁，保证多线程环境下的数据一致性
         self._lock = RLock()
 
-        # 内存索引映射，对群号、cf handle 与对应二元组分别构建映射，提升查询效率 
-        self._bindings: dict[tuple[str, str], CodeforcesBinding] = {}
-        self._group_index: dict[str, set[tuple[str, str]]] = {}
-        self._handle_index: dict[str, set[tuple[str, str]]] = {}
+        # 内存索引映射，对 AstrBot 会话 ID、cf handle 与对应二元组分别构建映射，提升查询效率 
+        self._bindings: dict[tuple[str, str], CodeforcesBinding] = {}   # (user_id, group_id) 为键
+        self._group_index: dict[str, set[tuple[str, str]]] = {}         # AstrBot session/group_id 为键
+        self._handle_index: dict[str, set[tuple[str, str]]] = {}        # handle 为键
 
         # 与数据库建立连接
         self._conn = sqlite3.connect(
@@ -98,7 +98,7 @@ class DataStorageHandler:
     def _normalize_id(value: str | int) -> str:
         normalized = str(value).strip()
         if not normalized:
-            raise ValueError("user_id and group_id cannot be empty")
+            raise ValueError("user_id and session/group_id cannot be empty")
         return normalized
 
     @staticmethod
@@ -330,7 +330,7 @@ class DataStorageHandler:
         group_id: str | int,
         only_broadcast_enabled: bool = False,
     ) -> list[CodeforcesBinding]:
-        """线程方法：通过群号获取对应群内所有的绑定信息"""
+        """线程方法：通过 AstrBot 会话 ID 获取对应会话内所有的绑定信息"""
         group_id = self._normalize_id(group_id)
         with self._lock:
             # 获取键值对列表
@@ -352,6 +352,35 @@ class DataStorageHandler:
         return await asyncio.to_thread(
             self.list_group_bindings,
             group_id,
+            only_broadcast_enabled,
+        )
+
+    def list_bindings(
+        self,
+        only_broadcast_enabled: bool = False,
+    ) -> list[CodeforcesBinding]:
+        """线程方法：获取所有绑定信息。"""
+        with self._lock:
+            bindings = list(self._bindings.values())
+
+        if only_broadcast_enabled:
+            bindings = [binding for binding in bindings if binding.enable_broadcast]
+        return sorted(
+            bindings,
+            key=lambda binding: (
+                binding.cf_handle.casefold(),
+                binding.group_id,
+                binding.user_id,
+            ),
+        )
+
+    async def alist_bindings(
+        self,
+        only_broadcast_enabled: bool = False,
+    ) -> list[CodeforcesBinding]:
+        """异步 IO：获取所有绑定信息。"""
+        return await asyncio.to_thread(
+            self.list_bindings,
             only_broadcast_enabled,
         )
 

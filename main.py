@@ -1,10 +1,6 @@
 # main.py
 from pathlib import Path
 import sqlite3
-import time
-import asyncio
-import datetime
-import re
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
@@ -13,9 +9,12 @@ from astrbot.api.message_components import At, Plain, BaseMessageComponent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .user_handle.user_info import UserInfoHandler
+from .user_handle.user_card import UserProfileCardRenderer
 from .user_status.user_status import UserStatusHandler
 from .contests.contest_info import ContestInfoHandler
+from .contests.contest_card import ContestCardRenderer
 from .storage.user_db import DataStorageHandler
+from .automation import AutomationPushHandler
 
 
 PLUGIN_NAME = "astrbot_plugin_for_XCPC"
@@ -46,34 +45,86 @@ class PluginForXCPC(Star):
 
         # 模块类实例化
         self.user_info_handler = UserInfoHandler()
+        self.user_card_renderer = UserProfileCardRenderer()
         self.user_status_handler = UserStatusHandler()
         self.contest_info_handler = ContestInfoHandler()
+        self.contest_card_renderer = ContestCardRenderer()
         self.user_db_handler = DataStorageHandler(db_path=self._build_user_db_path())
-        self.hour_contest = 0
-        self.minute_contest = 0
-
-        self._contest_push_running = True
-        if not self.contest_push_time:
-            logger.info("未设置比赛推送时间，跳过")
-            self._contest_push_running = False
-        elif not self._validate_time(self.contest_push_time):
-            logger.warn("时间格式错误，跳过配置")
-            self._contest_push_running = False
-        else:
-            self.hour_contest, self.minute_contest = map(int, self.contest_push_time.split(':'))
-        
-        self._contest_scheduler_task: asyncio.Task | None = None
+        self.automation_push_handler = AutomationPushHandler(
+            user_status_handler=self.user_status_handler,
+            contest_info_handler=self.contest_info_handler,
+            user_db_handler=self.user_db_handler,
+            loop_time=self.loop_time,
+            enable_getter=lambda: self.enable,
+            message_sender=self._send_automation_message,
+            contest_message_sender=self._send_contest_automation_message,
+            contest_number=self.contest_number,
+            contest_push_time=self.contest_push_time,
+            contest_push_sessions=self.contest_push_sessions,
+        )
 
     def _build_user_db_path(self) -> Path:
         plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         return plugin_data_dir / "user_bindings.sqlite3"
 
+    def _get_event_session_id(self, event: AstrMessageEvent) -> str:
+        session_id = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not session_id:
+            raise ValueError("无法获取当前会话 ID")
+        return session_id
+
+    @staticmethod
+    def _is_rendered_image_file(file_path: str | Path) -> bool:
+        try:
+            with Path(file_path).open("rb") as image_file:
+                header = image_file.read(12)
+        except OSError:
+            return False
+
+        return (
+            header.startswith(b"\x89PNG\r\n\x1a\n")
+            or header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"GIF87a")
+            or header.startswith(b"GIF89a")
+            or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        )
+
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-        if self._contest_push_running and self.contest_push_sessions:
-            self._contest_scheduler_task = asyncio.create_task(
-                self._auto_time_scheduler_contest()
+        await self.automation_push_handler.start()
+
+    async def _send_automation_message(self, session_id: str, message: str) -> None:
+        """
+        回调：发送自动化模块生成的纯文本消息。
+        """
+        logger.info("执行自动信息回调")
+        await self.context.send_message(session_id, MessageChain().message(message))
+
+    async def _render_contest_card_image(self, result) -> Path:
+        template, data, options = self.contest_card_renderer.build(result)
+        card_path = await self.html_render(template, data, return_url=False, options=options)
+        if not self._is_rendered_image_file(card_path):
+            raise ValueError(
+                f"AstrBot HTML 渲染返回的文件不是图片: {card_path}，"
+                "请检查 AstrBot 文转图服务状态"
             )
+        return Path(card_path)
+
+    async def _send_contest_automation_message(
+        self,
+        session_id: str,
+        result,
+        fallback_message: str,
+    ) -> None:
+        try:
+            card_path = await self._render_contest_card_image(result)
+            await self.context.send_message(
+                session_id,
+                MessageChain().file_image(str(card_path)),
+            )
+        except Exception as e:
+            logger.error(f"渲染比赛信息卡片失败，回退为文本推送: {e}")
+            await self._send_automation_message(session_id, fallback_message)
 
     def GetArgs(self, messages: list[BaseMessageComponent]):
         """参数解析逻辑"""
@@ -87,104 +138,6 @@ class PluginForXCPC(Star):
                     args.extend(text.split())
         return args
     
-    def build_contest_message(self, result):
-        """封装消息格式化逻辑"""
-        if not result.ok or result.contests is None:
-            return result.message
-        
-        contest_messages = []
-
-        for index, contest in enumerate(result.contests, start=1):
-            if contest.start_time_seconds is None:
-                start_time = "未知"
-            else:
-                start_time = datetime.datetime.fromtimestamp(contest.start_time_seconds).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-
-            duration_hours = contest.duration_seconds // 3600
-            duration_minutes = contest.duration_seconds % 3600 // 60
-            duration = f"{duration_hours} 小时 {duration_minutes} 分钟"
-
-            contest_messages.append(
-                "\n".join(
-                    [
-                        f"{index}. {contest.name}",
-                        f"比赛 ID: {contest.id}",
-                        f"比赛类型: {contest.type}",
-                        f"当前状态: {contest.phase}",
-                        f"开始时间: {start_time}",
-                        f"持续时间: {duration}",
-                        f"比赛链接: https://codeforces.com/contest/{contest.id}",
-                    ]
-                )
-            )
-
-        message_chain = "\n\n".join(contest_messages)
-
-        return message_chain
-
-    def _get_next_run_contest(self) -> datetime.datetime:
-        """计算下次比赛的推送时间"""
-        now = datetime.datetime.now()
-        target = now.replace(
-            hour=self.hour_contest,
-            minute=self.minute_contest,
-            second=0,
-            microsecond=0,
-        )
-        
-        if target <= now:
-            target += datetime.timedelta(days=1)
-
-        return target
-    
-    # 静态方法区
-    @staticmethod
-    def _validate_time(time_str: str):
-        """验证时间是否合法"""
-        if not isinstance(time_str, str):
-            return False
-
-        if re.fullmatch(r"\d{2}:\d{2}", time_str) is None:
-            return False
-
-        hour, minute = map(int, time_str.split(':'))
-        return 0 <= hour <= 23 and 0 <= minute <= 59
-        
-    
-    # 异步任务区
-    async def _contest_push_sessions(self):
-        """自动推送比赛信息到指定群聊"""
-        result_message = await self.contest_info_handler.ContestInfoRequest(self.contest_number)
-        msg = MessageChain().message(result_message)
-
-        for recv in self._contest_push_sessions:
-            await self.context.send_message(recv, msg)
-            logger.info(f"已经向群聊 {recv} 发送最近 {self.contest_number} 条消息")
-
-
-    # 自动化任务区
-    async def _auto_time_scheduler_contest(self):
-        """自动化任务：按照规定时间向指定群聊推送比赛信息"""
-        while self._contest_push_running:
-            try:
-                next_run = self._get_next_run_contest()
-                wait_seconds = (next_run - datetime.datetime.now()).total_seconds()
-
-                if wait_seconds > 0:
-                    logger.info(f"下次执行时间：{next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-                    await asyncio.sleep(wait_seconds)
-
-                if self._contest_push_running:
-                    logger.info(f"开始向指定群聊推送比赛任务")
-                    await self._contest_push_sessions()
-                    logger.info(f"比赛任务推送完成")
-            except Exception as e:
-                logger.error(f"比赛任务推送出错：{e}")
-                break
-
-
     # 用户 / 管理员指令区
     @filter.command("cf", alias={"CF", "cF", "Cf"})
     async def GetCodeforcesUserInfo(self, event: AstrMessageEvent):
@@ -205,8 +158,24 @@ class PluginForXCPC(Star):
         logger.info(f"从消息链中解析出 codeforces handle: {user_handle}")
 
         result = await self.user_info_handler.UserInfoRequest(user_handle)
-        logger.warning(result.message)
-        yield event.plain_result(result.message)
+        if not result.ok or result.profile is None:
+            logger.warning(result.message)
+            yield event.plain_result(result.message)
+            return
+
+        try:
+            template, data, options = self.user_card_renderer.build(result.profile)
+            card_path = await self.html_render(template, data, return_url=False, options=options)
+            if not self._is_rendered_image_file(card_path):
+                raise ValueError(
+                    f"AstrBot HTML 渲染返回的文件不是图片: {card_path}，"
+                    "请检查 AstrBot 文转图服务状态"
+                )
+            logger.info(f"已渲染 Codeforces 用户信息卡片: {card_path}")
+            yield event.image_result(str(card_path))
+        except Exception as e:
+            logger.error(f"渲染 Codeforces 用户信息卡片失败: {e}")
+            yield event.plain_result(result.message)
 
 
     @filter.command("比赛", alias={"contest", "contests", "cf比赛"})
@@ -220,10 +189,19 @@ class PluginForXCPC(Star):
         result = await self.contest_info_handler.ContestInfoRequest(self.contest_number)
         logger.info(result.message)
 
-        message_chain = self.build_contest_message(result)
+        message_chain = self.automation_push_handler.build_contest_message(result)
 
-        yield event.plain_result(result.message)
-        yield event.plain_result(message_chain)
+        if not result.ok or result.contests is None:
+            yield event.plain_result(result.message)
+            return
+
+        try:
+            card_path = await self._render_contest_card_image(result)
+            logger.info(f"已渲染 Codeforces 比赛信息卡片: {card_path}")
+            yield event.image_result(str(card_path))
+        except Exception as e:
+            logger.error(f"渲染 Codeforces 比赛信息卡片失败: {e}")
+            yield event.plain_result(message_chain)
 
 
     @filter.command("绑定", alias={"绑定cf"})
@@ -236,7 +214,7 @@ class PluginForXCPC(Star):
 
         # 用户信息获取
         user_id = event.get_sender_id()
-        group_id = event.get_group_id()
+        group_id = self._get_event_session_id(event)
         messages = event.get_messages()
         args = self.GetArgs(messages)
         
@@ -271,7 +249,7 @@ class PluginForXCPC(Star):
             return
 
         logger.info(f"用户 {user_id} 绑定 cf handle {cf_handle} 成功！")
-        yield event.plain_result("绑定成功！")
+        yield event.plain_result(f"绑定成功！(user_id: {user_id}, cf_handle: {cf_handle})")
 
     
     @filter.command("解绑")
@@ -284,7 +262,7 @@ class PluginForXCPC(Star):
         
         # 用户信息获取
         user_id = event.get_sender_id()
-        group_id = event.get_group_id()
+        group_id = self._get_event_session_id(event)
 
         result = await self.user_db_handler.aunbind_user(user_id, group_id)
         if not result:
@@ -305,7 +283,7 @@ class PluginForXCPC(Star):
         
         # 用户信息获取
         user_id = event.get_sender_id()
-        group_id = event.get_group_id()
+        group_id = self._get_event_session_id(event)
         
         # 获取用户绑定信息
         result = await self.user_db_handler.aget_binding(user_id, group_id)
@@ -329,7 +307,7 @@ class PluginForXCPC(Star):
         
         # 用户信息获取
         user_id = event.get_sender_id()
-        group_id = event.get_group_id()
+        group_id = self._get_event_session_id(event)
 
         # 调用数据库类方法，修改用户过题记录可见性
         result = await self.user_db_handler.aset_broadcast_enabled(user_id, group_id, True)
@@ -353,7 +331,7 @@ class PluginForXCPC(Star):
         
         # 用户信息获取
         user_id = event.get_sender_id()
-        group_id = event.get_group_id()
+        group_id = self._get_event_session_id(event)
 
         # 调用数据库类方法，修改用户过题记录可见性
         result = await self.user_db_handler.aset_broadcast_enabled(user_id, group_id, False)
@@ -402,8 +380,67 @@ class PluginForXCPC(Star):
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
-        self._contest_push_running = False
-        if self._contest_scheduler_task:
-            self._contest_scheduler_task.cancel()
+        await self.automation_push_handler.stop()
         await self.user_db_handler.aclose()
         
+
+    @filter.command("测试指纹", alias={"fingerprint", "test_fingerprint"})
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def CheckCurrentUserSubmissionFingerprint(self, event: AstrMessageEvent):
+        """测试命令：查询当前用户最新提交记录的指纹"""
+        if self.enable is False:
+            logger.warning("插件功能被阻止，无法使用 /测试指纹 指令")
+            return
+        
+        user_id = event.get_sender_id()
+        if user_id not in self.admin_id:
+            logger.warning(f"用户 {user_id} 无权执行该操作，退出")
+            return
+
+        user_id = event.get_sender_id()
+        group_id = self._get_event_session_id(event)
+
+        binding = await self.user_db_handler.aget_binding(user_id, group_id)
+        if binding is None:
+            logger.info(f"用户 {user_id} 未在群 {group_id} 中绑定任何信息，无法查询提交指纹")
+            yield event.plain_result("您还暂未绑定用户，请先使用 /绑定 <Codeforces handle>")
+            return
+
+        result = await self.user_status_handler.UserStatusRequest(binding.cf_handle)
+        if not result.ok:
+            logger.warning(f"查询 {binding.cf_handle} 提交指纹失败: {result.message}")
+            yield event.plain_result(f"查询提交指纹失败：{result.message}")
+            return
+
+        status = result.latest_status
+        if status is None:
+            logger.info(f"{binding.cf_handle} 暂无提交记录，无法生成提交指纹")
+            yield event.plain_result(f"{binding.cf_handle} 暂无提交记录，无法生成提交指纹")
+            return
+
+        fingerprint = self.automation_push_handler._build_submission_fingerprint(status)
+        logger.info(
+            f"用户 {user_id} 在群 {group_id} 查询 {binding.cf_handle} 最新提交指纹: {fingerprint}"
+        )
+
+        problem = status.problem
+        problem_id = (
+            f"{problem.contestId}{problem.index}"
+            if problem.contestId is not None
+            else problem.index
+        )
+        verdict_text = status.verdict or "未知"
+
+        yield event.plain_result(
+            "\n".join(
+                [
+                    "当前用户最新提交指纹：",
+                    f"Codeforces 用户: {binding.cf_handle}",
+                    f"提交指纹: {fingerprint}",
+                    f"已记录指纹: {binding.last_ac_fingerprint or '无'}",
+                    f"提交 ID: {status.id}",
+                    f"题目: {problem_id}. {problem.name}",
+                    f"判题结果: {verdict_text}",
+                ]
+            )
+        )
