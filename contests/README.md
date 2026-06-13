@@ -59,3 +59,13 @@ async def ContestInfoRequest(
     """查询比赛信息，并将加工后的消息返回给 main.py"""
 ```
 
+## contest_card.py
+
+`ContestCardRenderer` 负责将 `CodeforcesContestInfoResult` 转换为 AstrBot `html_render()` 所需的三元组：
+
+```python
+template, data, options = ContestCardRenderer().build(result)
+```
+
+渲染仍由 AstrBot 提供的文转图服务完成，插件只维护 HTML / Jinja2 模板、渲染数据和截图参数。手动 `/比赛` 查询和自动比赛推送共用同一套卡片模板；若文转图服务异常，则回退发送 `build_contest_message()` 生成的文本内容。
+

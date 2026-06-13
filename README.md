@@ -28,13 +28,23 @@
     - `legendary grandmaster`
     - `unrated` 使用灰色主题。
 
+#### 图片渲染
+
+用户信息卡片使用 AstrBot 官方 `html_render()` 接口和 AstrBot 提供的文转图服务渲染。插件仅提供 HTML / Jinja2 模板、渲染数据和截图参数，不直接启动浏览器进程，也不依赖 PIL 绘制卡片。
+
+部署到 Linux 服务器时，插件侧无需额外安装或管理 Playwright 浏览器运行时；只需确保 AstrBot 运行实例可以访问其文转图服务。
+
+- 若 AstrBot 文转图服务返回 502 / 5xx，插件会记录“返回文件不是图片”的错误，并回退为文本信息发送。
+- 卡片模板尺寸为 `760x430`，截图范围通过 `options.clip` 指定。
+
 ### 2. 绑定 Codeforces 用户 ✅
 
-支持群成员在不同群聊中绑定自己的 Codeforces 账号，绑定关系以群为单位隔离
+支持群成员在不同 AstrBot 会话中绑定自己的 Codeforces 账号，绑定关系以会话为单位隔离。 ✅
+这里的会话 ID 使用 AstrBot 的 `event.unified_msg_origin`，可直接传给 `context.send_message()`，不是纯数字群号。 ✅
 
 #### 设计目标
 
-- 支持同一 QQ 用户在不同群绑定不同的 `cf_handle` ✅
+- 支持同一 QQ 用户在不同会话绑定不同的 `cf_handle` ✅
 - 支持快速查询绑定信息 ✅
 - 支持插件加载 / 重载后恢复绑定数据 ✅
 - 支持用户单独控制是否参与过题播报 ✅
@@ -57,7 +67,7 @@
 |        字段名         |   类型    | 说明                                           |
 | :-------------------: | :-------: | :--------------------------------------------- |
 |       `user_id`       |  `TEXT`   | 平台用户 ID，修改后立刻写回数据库              |
-|      `group_id`       |  `TEXT`   | 群聊 ID，修改后立刻写回数据库                  |
+|      `group_id`       |  `TEXT`   | AstrBot 会话 ID，即 `event.unified_msg_origin` |
 |      `cf_handle`      |  `TEXT`   | 绑定的 Codeforces 用户名，修改后立刻写回数据库 |
 |  `enable_broadcast`   | `INTEGER` | 是否允许过题播报，`1` 表示开启，`0` 表示关闭   |
 | `last_ac_fingerprint` |  `TEXT`   | 最近一次已播报 AC 记录的指纹，默认为 `NULL`    |
@@ -84,23 +94,23 @@ ON cf_bindings(group_id, cf_handle COLLATE NOCASE);
 
 说明：
 
-- `(user_id, group_id)` 作为主键，可以唯一确定某个用户在某个群中的绑定关系
-- 创建 `group_id` 单列索引，按群获取全部绑定用户
+- `(user_id, group_id)` 作为主键，可以唯一确定某个用户在某个 AstrBot 会话中的绑定关系
+- 创建 `group_id` 单列索引，按会话获取全部绑定用户
 - 创建 `cf_handle` 索引，根据 `cf_handle` 反查用户 ID
-- 创建 `bind_group_handle` 索引，避免同群不同用户绑定同一 ID
+- 创建 `bind_group_handle` 索引，避免同一会话内不同用户绑定同一 ID
 
 ### 3. 近期比赛推送
 
-支持定时获取 / 手动获取 Codeforces 近期比赛信息，并推送到指定群聊。
+支持定时获取 / 手动获取 Codeforces 近期比赛信息，并推送到指定 AstrBot 会话。
 
 #### 功能规划
 
-- 每日定时通过 Codeforces API 获取近期比赛列表
+- 每日定时通过 Codeforces API 获取近期比赛列表 ✅
 - 通过指令唤醒推送比赛列表功能 ✅
-- 支持管理员配置需要推送的会话
-- 支持配置推送时间
+- 支持管理员配置需要推送的会话 ✅
+- 支持配置推送时间 ✅
 - 支持配置赛前提醒时间
-- 将比赛信息渲染为图片后发送
+- 将比赛信息通过 AstrBot 文转图服务渲染为图片后发送 ✅
 
 #### 推送内容 ✅
 
@@ -115,13 +125,13 @@ ON cf_bindings(group_id, cf_handle COLLATE NOCASE);
 
 ### 4. 群友过题播报
 
-支持周期性轮询群内已绑定的 Codeforces 用户，并在检测到新的 Accepted 提交时自动播报
+支持周期性轮询已绑定的 Codeforces 用户，并在检测到新的 Accepted 提交时向绑定所在的 AstrBot 会话自动播报。 ✅
 
 #### 功能规划
 
-- 每隔一段时间获取指定群聊中所有已绑定且开启播报的 `cf_handle`
-- 通过 Codeforces API 查询用户近期提交记录
-- 检测最近一次新的 AC 提交
-- 使用指纹机制避免重复播报
-- 播报成功后更新对应用户的最近 AC 指纹
-- 轮询间隔作为可配置项，由管理员配置
+- 每隔一段时间获取所有已绑定且开启播报的 `cf_handle` ✅
+- 通过 Codeforces API 查询用户近期提交记录 ✅
+- 检测最近一次新的 AC 提交 ✅
+- 使用指纹机制避免重复播报 ✅
+- 播报成功后更新对应用户的最近 AC 指纹 ✅
+- 轮询间隔作为可配置项，由管理员配置 ✅

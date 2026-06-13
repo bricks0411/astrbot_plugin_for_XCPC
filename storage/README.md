@@ -33,6 +33,34 @@ class CodeforcesBinding:
     updated_at: int = 0
 ```
 
+`group_id` 是沿用的字段名，当前实际存储 AstrBot 的完整会话 ID，即 `event.unified_msg_origin`。该值可直接用于自动推送时调用 `context.send_message()`，不再保存纯数字群号。
+
+在内存维护一份数据库备份
+
+```python
+self._bindings: dict[tuple[str, str], CodeforcesBinding] = {}   # (user_id, session_id) 为键
+self._group_index: dict[str, set[tuple[str, str]]] = {}         # session_id 为键
+"""
+{
+	session_id: {
+		(user_id, session_id),
+		(user_id, session_id),
+		...
+	}
+}
+"""
+self._handle_index: dict[str, set[tuple[str, str]]] = {}        # handle 为键
+"""
+{
+    cf_handle: {
+        (user_id, session_id),
+        (user_id, session_id),
+        ...
+    }
+}
+"""
+```
+
 #### 抽象接口
 
 **数据加载**
@@ -101,7 +129,15 @@ async def alist_group_bindings(
     group_id: str | int,
     only_broadcast_enabled: bool = False,
 ) -> list[CodeforcesBinding]
-	"""通过群号获取本群绑定信息列表"""
+	"""通过 AstrBot 会话 ID 获取该会话绑定信息列表"""
+```
+
+```python
+async def alist_bindings(
+    self,
+    only_broadcast_enabled: bool = False,
+) -> list[CodeforcesBinding]
+	"""获取所有绑定信息列表，可按是否开启播报过滤"""
 ```
 
 ```python
@@ -111,6 +147,14 @@ async def afind_by_handle(
 ) -> list[CodeforcesBinding]
 	 """通过 handle 获取用户绑定信息列表"""
 ```
+
+#### 自动化推送相关说明
+
+`automation.auto_push.AutomationPushHandler` 会通过 `alist_bindings(only_broadcast_enabled=True)` 获取所有允许播报的绑定记录。
+
+该接口是公开查询入口，用于替代直接访问 `_bindings`、`_group_index`、`_handle_index` 等内部缓存字段，避免外部模块绕过锁和封装。
+
+自动化播报会直接使用 `CodeforcesBinding.group_id` 作为发送目标，因此写入绑定时必须传入 AstrBot 的完整会话 ID。`main.py` 中使用 `event.unified_msg_origin` 作为该字段的来源。
 
 
 
