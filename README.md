@@ -6,6 +6,12 @@
   <img src="https://img.shields.io/badge/AstrBot-v4.22.0+-orange.svg" alt="AstrBot v4.22.0+">
   <img src="https://img.shields.io/badge/Codeforces-API-red.svg" alt="Codeforces API">
 </p>
+<p align="center">
+  <img src="https://count.getloli.com/@Brick0411andhisXCPCplugin?name=Brick0411andhisXCPCplugin&theme=green
+&padding=10&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
+</p>
+
+
 
 面向 XCPC / Codeforces 群聊场景的 AstrBot 插件，提供 Codeforces 用户信息查询、群内账号绑定、近期比赛查询与定时推送、群友 AC 播报等功能。
 
