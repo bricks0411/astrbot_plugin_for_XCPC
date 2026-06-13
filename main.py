@@ -1,12 +1,14 @@
 # main.py
+import asyncio
 from pathlib import Path
 import sqlite3
+import time
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.message_components import At, Plain, BaseMessageComponent
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_temp_path
 
 from .user_handle.user_info import UserInfoHandler
 from .user_handle.user_card import UserProfileCardRenderer
@@ -18,6 +20,9 @@ from .automation import AutomationPushHandler
 
 
 PLUGIN_NAME = "astrbot_plugin_for_XCPC"
+T2I_TEMP_FILE_PATTERN = "io_temp_img_*"
+T2I_TEMP_FILE_TTL_SECONDS = 24 * 60 * 60
+T2I_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
 @register(
@@ -42,6 +47,7 @@ class PluginForXCPC(Star):
         self.contest_number = config["contest_setting"]["contest_number"]
         self.contest_push_time = config["contest_setting"]["contest_push_time"]
         self.contest_push_sessions = config["contest_setting"]["contest_push_sessions"]
+        self._t2i_cleanup_task: asyncio.Task | None = None
 
         # 模块类实例化
         self.user_info_handler = UserInfoHandler()
@@ -91,7 +97,48 @@ class PluginForXCPC(Star):
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        await self._cleanup_t2i_temp_files()
+        self._t2i_cleanup_task = asyncio.create_task(self._t2i_cleanup_loop())
         await self.automation_push_handler.start()
+
+    async def _t2i_cleanup_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(T2I_CLEANUP_INTERVAL_SECONDS)
+                await self._cleanup_t2i_temp_files()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"定时清理 t2i 临时文件失败: {e}")
+
+    async def _cleanup_t2i_temp_files(self) -> None:
+        temp_dir = Path(get_astrbot_temp_path()).resolve()
+        if not temp_dir.exists():
+            return
+
+        now = time.time()
+        deleted_count = 0
+        deleted_size = 0
+        expired_before = now - T2I_TEMP_FILE_TTL_SECONDS
+
+        for file_path in temp_dir.glob(T2I_TEMP_FILE_PATTERN):
+            try:
+                resolved_path = file_path.resolve()
+                if resolved_path.parent != temp_dir or not resolved_path.is_file():
+                    continue
+
+                stat = resolved_path.stat()
+                if stat.st_mtime > expired_before:
+                    continue
+
+                deleted_size += stat.st_size
+                resolved_path.unlink()
+                deleted_count += 1
+            except OSError as e:
+                logger.warning(f"清理 t2i 临时文件失败: {file_path}, {e}")
+
+        if deleted_count:
+            logger.info(f"已清理 {deleted_count} 个 t2i 临时文件，释放 {deleted_size} 字节")
 
     async def _send_automation_message(self, session_id: str, message: str) -> None:
         """
@@ -380,6 +427,12 @@ class PluginForXCPC(Star):
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        if self._t2i_cleanup_task:
+            self._t2i_cleanup_task.cancel()
+            try:
+                await self._t2i_cleanup_task
+            except asyncio.CancelledError:
+                pass
         await self.automation_push_handler.stop()
         await self.user_db_handler.aclose()
         
