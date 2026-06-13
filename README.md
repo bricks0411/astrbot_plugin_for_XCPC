@@ -1,4 +1,4 @@
-- # astrbot_plugin_for_XCPC
+# astrbot_plugin_for_XCPC
 
   <p align="center">
     <img src="https://img.shields.io/badge/License-AGPL_3.0-blue.svg" alt="License: AGPL-3.0">
