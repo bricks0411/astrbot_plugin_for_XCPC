@@ -1,4 +1,53 @@
 # main.py
+"""
+AstrBot 插件入口模块。
+
+本文件负责把各个业务模块接入 AstrBot：
+- 用户资料查询命令调用 user_handle。
+- 比赛查询和比赛卡片渲染调用 contests。
+- 用户绑定、播报开关和指纹记录调用 storage。
+- 自动比赛推送和 AC 播报调用 automation。
+
+入口层尽量只做参数解析、权限判断、消息发送和异常回退。
+真实的 HTTP 请求、数据库操作和卡片数据构造都下沉到独立模块，避免命令函数过重。
+
+维护要点：
+- initialize 负责启动后台任务，terminate 负责按相反方向释放资源。
+- 命令函数是 AstrBot 的交互边界，所有用户输入都要在这里校验。
+- /cf 和 /比赛 优先渲染图片，渲染失败时回退为纯文本。
+- 绑定类命令只允许群聊使用，因为绑定关系包含会话维度。
+- 管理员命令只改变内存中的 enable 开关，不改写配置文件。
+- 自动推送模块通过 enable_getter 读取 enable，能即时响应开关变化。
+- html_render 可能返回非图片路径，因此发送前必须验证文件头。
+- t2i 临时文件清理只删除 AstrBot 临时目录下的目标文件名模式。
+- 任何涉及会话 ID 的逻辑都应使用 unified_msg_origin。
+- 发送自动消息时不依赖原始事件对象，只使用 session_id。
+- 数据库路径固定在插件数据目录，避免污染插件代码目录。
+- 用户可见错误尽量简短，详细原因保留在日志中。
+- Codeforces API 查询失败不应让命令抛出未捕获异常。
+- 卡片渲染失败不影响核心查询结果，只影响展示形式。
+- 指纹测试命令会暴露内部去重状态，因此只开放给管理员。
+- 新增命令时优先复用 GetArgs 解析文本参数。
+- 新增图片渲染能力时要复用 _is_rendered_image_file 校验。
+- 关闭插件时先停止后台任务，再关闭数据库连接。
+- 命令函数中不要直接操作 SQLite，同步/异步封装都在 storage 模块。
+- 入口层不保存 Codeforces 原始 JSON，只传递内部结果模型。
+- 修改配置字段名时需要同步 _conf_schema.json 和这里的读取路径。
+- 自动推送和手动查询共享同一套比赛卡片渲染器。
+- 自动推送文本回调用于提交播报和比赛卡片失败兜底。
+- 日志信息用于排查远端 API、渲染服务和数据库状态。
+- 这里的注释以流程边界为主，避免重复解释下层模块内部实现。
+- 用户命令通常使用 yield 返回 AstrBot 结果，后台回调直接调用 context 发送。
+- 群聊命令读取 session_id，不直接假设 group_id 是纯数字群号。
+- 绑定前先查 Codeforces 用户是否存在，避免无效 handle 进入数据库。
+- 数据库仍保留唯一约束，用于兜底并发场景下的重复绑定。
+- enable 开关只阻止命令和自动轮询，不销毁已经创建的后台任务。
+- 比赛自动推送的图片失败时，仍会发送 build_contest_message 文本。
+- 用户资料卡片失败时，仍会发送 user.info 返回的 message。
+- terminate 中忽略清理任务的 CancelledError，属于正常关闭流程。
+- 不同命令的参数数量校验尽量在远端 API 请求前完成。
+- 这里不做 Codeforces API 节流，自动任务节流在 automation 模块中实现。
+"""
 import asyncio
 from pathlib import Path
 import sqlite3
@@ -32,6 +81,8 @@ T2I_CLEANUP_INTERVAL_SECONDS = 60 * 60
     "0.0.1",
 )
 class PluginForXCPC(Star):
+    """XCPC 辅助插件主类，负责 AstrBot 生命周期和命令注册。"""
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         # 配置项实例化
@@ -47,6 +98,7 @@ class PluginForXCPC(Star):
         self.contest_number = config["contest_setting"]["contest_number"]
         self.contest_push_time = config["contest_setting"]["contest_push_time"]
         self.contest_push_sessions = config["contest_setting"]["contest_push_sessions"]
+        # t2i 临时文件清理任务在 initialize 中启动，terminate 中取消。
         self._t2i_cleanup_task: asyncio.Task | None = None
 
         # 模块类实例化
@@ -56,6 +108,7 @@ class PluginForXCPC(Star):
         self.contest_info_handler = ContestInfoHandler()
         self.contest_card_renderer = ContestCardRenderer()
         self.user_db_handler = DataStorageHandler(db_path=self._build_user_db_path())
+        # 自动化模块通过回调发送消息，避免直接依赖 AstrBot 事件对象。
         self.automation_push_handler = AutomationPushHandler(
             user_status_handler=self.user_status_handler,
             contest_info_handler=self.contest_info_handler,
@@ -70,10 +123,12 @@ class PluginForXCPC(Star):
         )
 
     def _build_user_db_path(self) -> Path:
+        """构造插件专用 SQLite 数据库路径。"""
         plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         return plugin_data_dir / "user_bindings.sqlite3"
 
     def _get_event_session_id(self, event: AstrMessageEvent) -> str:
+        """从 AstrBot 事件中提取统一会话 ID。"""
         session_id = str(getattr(event, "unified_msg_origin", "") or "").strip()
         if not session_id:
             raise ValueError("无法获取当前会话 ID")
@@ -81,6 +136,7 @@ class PluginForXCPC(Star):
 
     @staticmethod
     def _is_rendered_image_file(file_path: str | Path) -> bool:
+        """用文件头判断 html_render 返回值是否是真实图片文件。"""
         try:
             with Path(file_path).open("rb") as image_file:
                 header = image_file.read(12)
@@ -97,11 +153,13 @@ class PluginForXCPC(Star):
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        # 启动前先清理一次历史 t2i 文件，再创建长期清理任务。
         await self._cleanup_t2i_temp_files()
         self._t2i_cleanup_task = asyncio.create_task(self._t2i_cleanup_loop())
         await self.automation_push_handler.start()
 
     async def _t2i_cleanup_loop(self) -> None:
+        """周期性清理 AstrBot 文转图临时文件。"""
         while True:
             try:
                 await asyncio.sleep(T2I_CLEANUP_INTERVAL_SECONDS)
@@ -112,6 +170,7 @@ class PluginForXCPC(Star):
                 logger.error(f"定时清理 t2i 临时文件失败: {e}")
 
     async def _cleanup_t2i_temp_files(self) -> None:
+        """删除超过 TTL 的 t2i 临时图片。"""
         temp_dir = Path(get_astrbot_temp_path()).resolve()
         if not temp_dir.exists():
             return
@@ -124,6 +183,7 @@ class PluginForXCPC(Star):
         for file_path in temp_dir.glob(T2I_TEMP_FILE_PATTERN):
             try:
                 resolved_path = file_path.resolve()
+                # 只删除 temp_dir 直属文件，避免通配符或符号链接误伤其它路径。
                 if resolved_path.parent != temp_dir or not resolved_path.is_file():
                     continue
 
@@ -148,6 +208,7 @@ class PluginForXCPC(Star):
         await self.context.send_message(session_id, MessageChain().message(message))
 
     async def _render_contest_card_image(self, result) -> Path:
+        """渲染比赛卡片，并校验 AstrBot 返回的是图片文件。"""
         template, data, options = self.contest_card_renderer.build(result)
         card_path = await self.html_render(template, data, return_url=False, options=options)
         if not self._is_rendered_image_file(card_path):
@@ -163,6 +224,7 @@ class PluginForXCPC(Star):
         result,
         fallback_message: str,
     ) -> None:
+        """比赛信息卡片发送逻辑"""
         try:
             card_path = await self._render_contest_card_image(result)
             await self.context.send_message(
@@ -177,6 +239,7 @@ class PluginForXCPC(Star):
         """参数解析逻辑"""
         args = []
         for msg in messages:
+            # @ 消息不参与命令参数解析，只解析纯文本片段。
             if isinstance(msg, At):
                 continue
             if isinstance(msg, Plain):
@@ -206,6 +269,7 @@ class PluginForXCPC(Star):
 
         result = await self.user_info_handler.UserInfoRequest(user_handle)
         if not result.ok or result.profile is None:
+            # API 失败直接把错误文本回给用户，不进入卡片渲染流程。
             logger.warning(result.message)
             yield event.plain_result(result.message)
             return
@@ -213,6 +277,7 @@ class PluginForXCPC(Star):
         try:
             template, data, options = self.user_card_renderer.build(result.profile)
             card_path = await self.html_render(template, data, return_url=False, options=options)
+            # html_render 异常时可能返回非图片路径，发送前必须做文件头校验。
             if not self._is_rendered_image_file(card_path):
                 raise ValueError(
                     f"AstrBot HTML 渲染返回的文件不是图片: {card_path}，"
@@ -236,6 +301,7 @@ class PluginForXCPC(Star):
         result = await self.contest_info_handler.ContestInfoRequest(self.contest_number)
         logger.info(result.message)
 
+        # 文本消息同时作为渲染失败时的兜底内容。
         message_chain = self.automation_push_handler.build_contest_message(result)
 
         if not result.ok or result.contests is None:
@@ -289,6 +355,7 @@ class PluginForXCPC(Star):
 
         # 调用数据库类方法，修改用户绑定信息
         try:
+            # 数据库唯一约束是最后一道防线，避免并发绑定同一 handle。
             await self.user_db_handler.abind_user(user_id, group_id, cf_handle, None)
         except sqlite3.IntegrityError:
             logger.info(f"检测到 {cf_handle} 已经被 {user_id} 绑定")
@@ -399,6 +466,7 @@ class PluginForXCPC(Star):
         user_id = event.get_sender_id()
         logger.info(f"用户 {user_id} 尝试启用插件总开关")
         if user_id not in self.admin_id:
+            # 管理员命令不回显具体原因，减少普通用户误触时的噪声。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
         if self.enable is True:
@@ -415,6 +483,7 @@ class PluginForXCPC(Star):
         user_id = event.get_sender_id()
         logger.info(f"用户 {user_id} 尝试关闭插件总开关")
         if user_id not in self.admin_id:
+            # 管理员命令不回显具体原因，减少普通用户误触时的噪声。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
         if self.enable is False:
@@ -428,6 +497,7 @@ class PluginForXCPC(Star):
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         if self._t2i_cleanup_task:
+            # 先停清理任务，再停自动推送和数据库连接，避免后台任务继续访问已关闭资源。
             self._t2i_cleanup_task.cancel()
             try:
                 await self._t2i_cleanup_task
@@ -447,6 +517,7 @@ class PluginForXCPC(Star):
         
         user_id = event.get_sender_id()
         if user_id not in self.admin_id:
+            # 指纹测试命令会暴露内部状态，只允许管理员使用。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
 
@@ -472,6 +543,7 @@ class PluginForXCPC(Star):
             return
 
         fingerprint = self.automation_push_handler._build_submission_fingerprint(status)
+        # 该命令用于排查自动播报去重问题，因此直接展示当前指纹和已记录指纹。
         logger.info(
             f"用户 {user_id} 在群 {group_id} 查询 {binding.cf_handle} 最新提交指纹: {fingerprint}"
         )

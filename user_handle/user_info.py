@@ -1,10 +1,37 @@
 # user_handle/user_info.py
+"""
+Codeforces 用户资料查询模块。
+
+本模块封装 user.info 接口，只查询单个 handle，并把返回的 JSON 转为
+CodeforcesUserProfile。外部命令和卡片渲染只依赖项目内模型，不直接依赖
+Codeforces 原始字段名。
+
+接口调用采用同步 requests + asyncio.to_thread 的组合：
+- 同步函数集中处理网络异常、HTTP 异常和 JSON 格式异常。
+- 异步入口负责把阻塞调用挪到线程中，保证机器人主循环可继续处理消息。
+
+维护要点：
+- user.info 使用 handles 参数，即使只查一个 handle 也会返回列表。
+- handle 为空时直接返回失败结果，不访问远端接口。
+- profile.handle 是必填字段，其它展示字段都可能缺失。
+- titlePhoto 和 avatar 都原样保存，由卡片渲染器决定优先级。
+- contribution、friendOfCount 等字段可能不存在，不应强制校验。
+- HTTP 层成功不代表业务成功，仍需检查 payload.status。
+- API 业务错误会通过 comment 返回，例如用户不存在。
+- message 用于命令回显和日志，不在这里拼接卡片文案。
+- _build_profile 只做字段映射，不做展示格式化。
+- 新增用户字段时优先保持可选，避免旧账号数据缺字段时报错。
+- requests 调用必须设置 User-Agent，减少被远端拒绝的概率。
+- 这里的注释主要说明 user.info 的返回结构和容错边界。
+"""
 import asyncio
 import requests
 from .models import CodeforcesUserInfoResult, CodeforcesUserProfile
 
 
 class UserInfoHandler:
+    """负责获取并转换 Codeforces 用户资料。"""
+
     API_URL = "https://codeforces.com/api/user.info"
     REQUEST_TIMEOUT = 10
     USER_AGENT = "astrbot-plugin-for-xcpc/0.0.1"
@@ -13,6 +40,7 @@ class UserInfoHandler:
         pass
 
     def _build_profile(self, user_data: dict) -> CodeforcesUserProfile:
+        """把 user.info 的单个用户对象转换为内部数据模型。"""
         return CodeforcesUserProfile(
             handle=user_data["handle"],
             rank=user_data.get("rank"),
