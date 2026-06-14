@@ -1,3 +1,34 @@
+"""
+Codeforces 比赛列表卡片渲染模块。
+
+该模块不直接调用 AstrBot 的渲染服务，而是产出 html_render 所需的三元组：
+template、data、options。这样命令查询和自动推送可以复用同一张卡片。
+
+模板内的高度需要随比赛数量变化，否则长比赛名或多条比赛记录可能被截图裁掉。
+因此 Python 层负责计算最小高度，CSS 层负责可换行、可截断和状态主题颜色。
+
+维护要点：
+- WIDTH 是截图宽度的单一来源，CSS、data 和 options 都依赖它。
+- min_height 由 Python 计算，避免在模板里写复杂高度表达式。
+- 颜色主题只根据 phase 选择，不在模板中硬编码业务判断。
+- 所有进入模板的外部文本都必须经过 _escape。
+- 比赛名称允许换行，右侧日期和时间保持不换行。
+- full_page 截图依赖 DOM 实际高度，因此不要重新启用固定 clip。
+- footer 使用 margin-top:auto，让短列表和长列表都能自然贴底。
+- 空状态复用列表区域高度，避免没有比赛时卡片塌陷。
+- BEFORE/CODING 等 phase 来自 Codeforces 原始枚举。
+- FINISH 是兼容旧数据或本地测试数据的宽松别名。
+- 类型文本只做展示翻译，原始未知类型保留原样输出。
+- start_time_seconds 可能缺失，渲染层必须展示占位文本。
+- duration_seconds 理论上必填，但格式化函数仍保留 None 兜底。
+- before_start 只在比赛未开始时作为辅助标签显示。
+- HTML 模板中的 GitHub 图标是内联 SVG，避免额外资源请求。
+- 模板注释只描述结构，不参与最终业务数据计算。
+- 修改行高、间距或字体大小后，需要同步检查 _calculate_min_height。
+- 新增比赛字段时优先在 _build_contest_item 中转换为展示字段。
+- 不要把 Codeforces 原始对象直接传入模板，避免模板承担业务逻辑。
+- 该渲染器不关心消息发送方式，只返回 AstrBot 可消费的渲染参数。
+"""
 from __future__ import annotations
 
 import datetime
@@ -92,6 +123,40 @@ class ContestCardRenderer:
   <meta charset="utf-8" />
   <meta name="viewport" content="width={{ width }}, initial-scale=1" />
   <style>
+    /*
+     * 比赛卡片样式维护地图：
+     * 1. 基础画布负责截图尺寸和全局字体。
+     * 2. .board 是唯一外层容器，负责白底、阴影和垂直布局。
+     * 3. .topbar 固定高度，展示标题、摘要和品牌。
+     * 4. .brand 与 .bars 只负责 Codeforces 风格标识。
+     * 5. .list 是比赛条目的承载区，高度随内容增长。
+     * 6. .contest 是单场比赛行，使用 CSS 变量注入状态颜色。
+     * 7. .index 用状态强调色展示序号，便于视觉扫描。
+     * 8. .main 承载比赛名称和标签，必须允许文本换行。
+     * 9. .meta 使用 flex-wrap，避免多个标签挤出卡片。
+     * 10. .pill 是通用标签，.pill.phase 使用阶段专属配色。
+     * 11. .side 固定右栏宽度，展示日期、时间和比赛 ID。
+     * 12. .empty 复用列表视觉结构，避免空数据时卡片塌陷。
+     * 13. .footer 放生成时间和水印，短列表时仍贴近卡片底部。
+     * 14. .watermark 是轻量标识，不参与业务信息展示。
+     * 15. 修改任何固定高度后，都要同步 Python 的高度计算常量。
+     * 16. 不要在 CSS 中写比赛阶段判断，阶段逻辑属于 Python 数据层。
+     * 17. 不要移除 overflow-wrap，Codeforces 比赛名可能非常长。
+     * 18. 不要把卡片改成响应式宽度，截图服务需要稳定尺寸。
+     * 19. 颜色保持浅背景深文本，保证聊天图片中的可读性。
+     * 20. 新增视觉元素时优先放在现有网格中，避免增加截图裁剪风险。
+     * 21. 日期栏保持窄宽度，主要信息始终让位给比赛名称。
+     * 22. 标签文本来自 Python 格式化结果，不在模板中拼接单位。
+     * 23. 过长摘要会省略，避免挤压右侧品牌标识。
+     * 24. 状态色同时用于左边框和序号，形成一致的阶段提示。
+     * 25. 列表项之间使用 margin-bottom，不依赖父级 gap，兼容截图服务。
+     * 26. 空状态使用虚线边框，和真实比赛项形成明显区分。
+     * 27. 修改品牌区时要保留 max-width，避免遮挡标题摘要。
+     * 28. 模板内不要添加外链字体，避免截图环境网络波动。
+     * 29. 所有颜色值都应保持足够对比度，优先照顾聊天窗口缩略图。
+     * 30. 如需新增移动端样式，应新建模板，不要影响固定截图模板。
+     */
+    /* 基础画布：固定宽度，避免 AstrBot 截图时因视口变化导致布局漂移。 */
     * { box-sizing: border-box; }
     html {
       width: {{ width }}px;
@@ -113,6 +178,7 @@ class ContestCardRenderer:
       color: #182033;
     }
     .board {
+      /* 主卡片作为唯一外框，内部列表通过 flex 垂直排布。 */
       width: calc(100% - 40px);
       min-height: calc({{ min_height }}px - 40px);
       margin: 20px;
@@ -124,6 +190,7 @@ class ContestCardRenderer:
       flex-direction: column;
     }
     .topbar {
+      /* 顶部区域承载标题、摘要和 Codeforces 标识。 */
       position: relative;
       flex: none;
       height: 112px;
@@ -181,10 +248,12 @@ class ContestCardRenderer:
     .forces { color: #2d6cdf; }
 
     .list {
+      /* 列表高度由内容决定，full_page 截图会捕获完整 DOM。 */
       flex: none;
       padding: 18px 24px 0;
     }
     .contest {
+      /* 每场比赛使用状态色作为左侧强调色，便于快速区分阶段。 */
       --phase-bg: #f1f5f9;
       --phase-text: #475569;
       --phase-border: #cbd5e1;
@@ -233,6 +302,7 @@ class ContestCardRenderer:
       word-break: break-word;
     }
     .meta {
+      /* 标签允许换行，避免长比赛名称和多个状态标签互相挤压。 */
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
@@ -258,6 +328,7 @@ class ContestCardRenderer:
       border-color: var(--phase-border);
     }
     .side {
+      /* 右侧固定宽度展示日期、时间和比赛 ID。 */
       text-align: right;
       align-self: center;
       min-width: 0;
@@ -298,6 +369,7 @@ class ContestCardRenderer:
       font-weight: 760;
     }
     .footer {
+      /* 页脚贴底显示生成时间和水印，短列表也能保持视觉平衡。 */
       flex: none;
       min-height: 64px;
       margin-top: auto;
@@ -348,6 +420,7 @@ class ContestCardRenderer:
 </head>
 <body>
   <div class="board">
+    <!-- 头部摘要区：固定高度，保证不同比赛数量下标题位置稳定。 -->
     <div class="topbar">
       <h1 class="title">比赛信息</h1>
       <div class="subtitle">{{ summary }}</div>
@@ -358,6 +431,7 @@ class ContestCardRenderer:
     </div>
 
     <div class="list">
+      <!-- 比赛列表区：无数据时渲染空状态，有数据时逐条渲染比赛卡片。 -->
       {% if contests %}
       {% for contest in contests %}
       <div class="contest" style="--phase-bg: {{ contest.phase_bg }}; --phase-text: {{ contest.phase_text }}; --phase-border: {{ contest.phase_border }}; --phase-accent: {{ contest.phase_accent }};">
@@ -386,6 +460,7 @@ class ContestCardRenderer:
     </div>
 
     <div class="footer">
+      <!-- 页脚区：展示生成时间和项目水印。 -->
       <span>{{ generated_at }}</span>
       <span class="watermark" aria-label="GitHub watermark">
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -402,6 +477,7 @@ class ContestCardRenderer:
 """
 
     def build(self, result: CodeforcesContestInfoResult) -> tuple[str, dict, dict]:
+        """构造 AstrBot html_render 所需的模板、数据和截图参数。"""
         contests = result.contests or []
         contest_items = [
             self._build_contest_item(index, contest)
@@ -434,6 +510,7 @@ class ContestCardRenderer:
 
     @classmethod
     def _calculate_min_height(cls, contest_count: int) -> int:
+        """根据比赛数量计算 full_page 截图需要的最小高度。"""
         if contest_count <= 0:
             list_content_height = cls.EMPTY_HEIGHT
         else:
@@ -450,6 +527,7 @@ class ContestCardRenderer:
         return cls.OUTER_MARGIN * 2 + board_height
 
     def _build_contest_item(self, index: int, contest: CodeforcesContestProfile) -> dict:
+        """把单场比赛模型转换为模板可直接使用的字典。"""
         start_time = self._format_start_time(contest.start_time_seconds)
         phase = self._normalize_phase(contest.phase)
         theme = self._phase_theme(phase)
@@ -472,10 +550,12 @@ class ContestCardRenderer:
 
     @classmethod
     def _phase_theme(cls, phase: str) -> dict:
+        """根据比赛阶段选择状态主题色。"""
         return cls.PHASE_THEME.get(phase, cls.DEFAULT_PHASE_THEME)
 
     @staticmethod
     def _normalize_phase(phase: str | None) -> str:
+        """统一比赛阶段文本，便于映射主题和中文显示。"""
         if not phase:
             return "UNKNOWN"
         return str(phase).strip().upper()
@@ -510,6 +590,7 @@ class ContestCardRenderer:
 
     @staticmethod
     def _format_before_start(seconds: int | None) -> str:
+        """生成距离开赛时间的短文本。"""
         if seconds is None:
             return ""
         delta_seconds = seconds - int(datetime.datetime.now().timestamp())
@@ -524,4 +605,5 @@ class ContestCardRenderer:
 
     @staticmethod
     def _escape(value: object) -> str:
+        """转义进入 HTML 模板的文本，避免特殊字符破坏 DOM。"""
         return html.escape(str(value), quote=True)

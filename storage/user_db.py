@@ -1,4 +1,55 @@
 # storage/user_db.py
+"""
+用户绑定数据存储模块。
+
+本模块使用 SQLite 保存 QQ 用户、AstrBot 会话和 Codeforces handle 的绑定关系。
+数据库负责持久化，内存索引负责快速查询；每次写入成功后都会同步更新缓存。
+
+并发策略：
+- SQLite 连接启用 WAL，降低读写互相阻塞的概率。
+- 写操作统一经过 _run_write，并在 RLock 保护下执行。
+- 异步方法通过 asyncio.to_thread 调用同步方法，避免阻塞 AstrBot 事件循环。
+
+业务约束：
+- 同一个用户在同一个会话只能绑定一个 handle。
+- 同一个会话内同一个 handle 只能被一个用户绑定。
+- last_ac_fingerprint 用于自动播报去重，切换 handle 时需要重置。
+
+维护要点：
+- 数据库是权威状态，缓存只是加速查询的镜像。
+- 写入路径必须先成功提交 SQLite，再更新内存缓存。
+- 如果数据库写入失败，缓存不能提前变化。
+- _bindings 以 (user_id, group_id) 为主键，匹配数据库主键。
+- _group_index 用于快速列出某个会话内的全部绑定。
+- _handle_index 用于判断某个 handle 在哪些会话中出现。
+- handle 索引用 casefold 键，避免大小写差异绕过唯一性检查。
+- 展示时仍保留用户输入的原始 handle 大小写。
+- get_group_binding_by_handle 需要同时检查 handle 和 group_id。
+- list 类方法返回排序后的列表，保证命令输出稳定。
+- async 方法只是同步方法的线程包装，不重复实现业务逻辑。
+- RLock 保护 SQLite 连接和三份缓存索引的一致性。
+- check_same_thread=False 允许连接跨线程使用，但必须配合锁。
+- busy_timeout 用于等待 SQLite 锁，减少短暂写冲突导致的失败。
+- WAL 文件由 SQLite 管理，不需要业务代码手动清理。
+- enable_broadcast 是用户维度开关，不影响绑定是否存在。
+- last_ac_fingerprint 为 None 表示还没有建立播报基线。
+- baseline: 前缀由自动推送模块写入，用于区分非 AC 基线。
+- update_last_ac_fingerprint 只改指纹，不改变播报开关。
+- close 只关闭连接，调用方需要先停止可能访问数据库的后台任务。
+- 新增字段时需要同步建表 SQL、_row_to_binding 和写入语句。
+- 新增查询入口时优先利用现有缓存索引，避免不必要的 SQL 查询。
+- 这里的注释主要说明一致性和唯一性边界。
+- reload_cache 会完全重建缓存，适合启动或手动修复后同步状态。
+- _cache_put 会先删除旧索引再添加新索引，避免 handle 更新留下旧索引。
+- 删除绑定时需要同时删除主缓存、群索引和 handle 索引。
+- 数据库主键只约束用户在单个会话中的绑定。
+- 额外唯一索引用于约束同一会话内 handle 不能被多人占用。
+- set_broadcast_enabled 不改变 cf_handle，避免开关命令意外覆盖绑定。
+- bind_user 切换 handle 时重置指纹，防止新账号继承旧账号播报状态。
+- 这里的同步方法可以直接测试，异步方法主要服务 AstrBot 调用。
+- SQLite 行对象通过 row_factory 转为 sqlite3.Row，便于按字段名读取。
+- updated_at 统一使用秒级 Unix 时间戳，满足简单排序和排查需求。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -53,7 +104,9 @@ class DataStorageHandler:
     def _configure_connection(self, busy_timeout_ms: int) -> None:
         """连接参数配置：同步策略、日志策略、超时时长等"""
         with self._lock:
+            # WAL 允许读写更好地并发，适合机器人这种读多写少的小型本地数据库。
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # FULL 同步更保守，优先保证绑定数据在异常退出时不丢失。
             self._conn.execute("PRAGMA synchronous=FULL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA temp_store=MEMORY")
@@ -63,6 +116,7 @@ class DataStorageHandler:
     def _init_schema(self) -> None:
         """表创建逻辑"""
         with self._lock:
+            # uq_bind_group_handle 保证同一群内同一个 CF handle 不会被多人重复绑定。
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS cf_bindings (
@@ -96,6 +150,7 @@ class DataStorageHandler:
 
     @staticmethod
     def _normalize_id(value: str | int) -> str:
+        """统一把 AstrBot/QQ ID 转成非空字符串。"""
         normalized = str(value).strip()
         if not normalized:
             raise ValueError("user_id and session/group_id cannot be empty")
@@ -103,6 +158,7 @@ class DataStorageHandler:
 
     @staticmethod
     def _normalize_handle(value: str) -> str:
+        """统一清理 Codeforces handle，保留原大小写用于展示。"""
         handle = value.strip()
         if not handle:
             raise ValueError("cf_handle cannot be empty")
@@ -127,12 +183,14 @@ class DataStorageHandler:
         self._group_index.clear()
         self._handle_index.clear()
         for binding in bindings:
+            # 重建缓存时所有索引都从同一批 binding 派生，避免索引间出现脏数据。
             self._cache_add(binding)
 
     def _cache_add(self, binding: CodeforcesBinding) -> None:
         """向内存索引添加单条记录，调用方需保证 key 不重复"""
         key = (binding.user_id, binding.group_id)
         self._bindings[key] = binding
+        # 额外索引用 key 集合保存，避免复制完整 binding 对象导致同步复杂。
         self._group_index.setdefault(binding.group_id, set()).add(key)
         self._handle_index.setdefault(binding.cf_handle.casefold(), set()).add(key)
 
@@ -154,6 +212,7 @@ class DataStorageHandler:
         if binding is None:
             return None
 
+        # 删除主缓存后，需要同步清理 group 和 handle 两个二级索引。
         group_keys = self._group_index.get(group_id)
         if group_keys is not None:
             group_keys.discard(key)
@@ -238,6 +297,7 @@ class DataStorageHandler:
                     else bool(enable_broadcast)    
                 )
             )
+            # INSERT ... ON CONFLICT 同时覆盖“首次绑定”和“更新绑定”两种情况。
             # 调用写操作逻辑，更新持久化数据
             self._run_write(
                 """
@@ -335,6 +395,7 @@ class DataStorageHandler:
         with self._lock:
             # 获取键值对列表
             keys = self._group_index.get(group_id, set()).copy()
+            # 锁内只复制当前快照，后续过滤和排序不继续持有数据库锁。
             # 通过键值对获取 binding 列表
             bindings = [self._bindings[key] for key in keys if key in self._bindings]
 
@@ -413,6 +474,7 @@ class DataStorageHandler:
             if current is None:
                 return None
             
+            # 先写数据库再写缓存，保证内存状态不会领先于持久化状态。
             # 调用数据库修改逻辑
             cursor = self._run_write(
                 """
@@ -469,6 +531,7 @@ class DataStorageHandler:
             if current is None:
                 return None
 
+            # 指纹只用于自动播报去重，不参与唯一约束。
             cursor = self._run_write(
                 """
                 UPDATE cf_bindings
@@ -514,6 +577,7 @@ class DataStorageHandler:
             keys = self._handle_index.get(handle_key, set()).copy()
             for key in keys:
                 binding = self._bindings.get(key)
+                # handle 索引是跨群的，因此还需要再判断 group_id。
                 if binding is not None and binding.group_id == group_id:
                     return binding
         return None
