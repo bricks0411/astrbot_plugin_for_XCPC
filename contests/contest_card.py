@@ -1,34 +1,4 @@
-"""
-Codeforces 比赛列表卡片渲染模块。
-
-该模块不直接调用 AstrBot 的渲染服务，而是产出 html_render 所需的三元组：
-template、data、options。这样命令查询和自动推送可以复用同一张卡片。
-
-模板内的高度需要随比赛数量变化，否则长比赛名或多条比赛记录可能被截图裁掉。
-因此 Python 层负责计算最小高度，CSS 层负责可换行、可截断和状态主题颜色。
-
-维护要点：
-- WIDTH 是截图宽度的单一来源，CSS、data 和 options 都依赖它。
-- min_height 由 Python 计算，避免在模板里写复杂高度表达式。
-- 颜色主题只根据 phase 选择，不在模板中硬编码业务判断。
-- 所有进入模板的外部文本都必须经过 _escape。
-- 比赛名称允许换行，右侧日期和时间保持不换行。
-- full_page 截图依赖 DOM 实际高度，因此不要重新启用固定 clip。
-- footer 使用 margin-top:auto，让短列表和长列表都能自然贴底。
-- 空状态复用列表区域高度，避免没有比赛时卡片塌陷。
-- BEFORE/CODING 等 phase 来自 Codeforces 原始枚举。
-- FINISH 是兼容旧数据或本地测试数据的宽松别名。
-- 类型文本只做展示翻译，原始未知类型保留原样输出。
-- start_time_seconds 可能缺失，渲染层必须展示占位文本。
-- duration_seconds 理论上必填，但格式化函数仍保留 None 兜底。
-- before_start 只在比赛未开始时作为辅助标签显示。
-- HTML 模板中的 GitHub 图标是内联 SVG，避免额外资源请求。
-- 模板注释只描述结构，不参与最终业务数据计算。
-- 修改行高、间距或字体大小后，需要同步检查 _calculate_min_height。
-- 新增比赛字段时优先在 _build_contest_item 中转换为展示字段。
-- 不要把 Codeforces 原始对象直接传入模板，避免模板承担业务逻辑。
-- 该渲染器不关心消息发送方式，只返回 AstrBot 可消费的渲染参数。
-"""
+"""Codeforces 比赛卡片渲染数据构造。"""
 from __future__ import annotations
 
 import datetime
@@ -51,9 +21,6 @@ class ContestCardRenderer:
     FOOTER_HEIGHT = 64
     EMPTY_HEIGHT = 102
 
-    # Codeforces API 的 contest.phase 可能取值：
-    # BEFORE、CODING、PENDING_SYSTEM_TEST、SYSTEM_TEST、FINISHED。
-    # FINISH 是兼容旧数据或本地测试数据的宽松别名。
     PHASE_THEME = {
         "BEFORE": {
             "text": "#15803d",
@@ -123,40 +90,6 @@ class ContestCardRenderer:
   <meta charset="utf-8" />
   <meta name="viewport" content="width={{ width }}, initial-scale=1" />
   <style>
-    /*
-     * 比赛卡片样式维护地图：
-     * 1. 基础画布负责截图尺寸和全局字体。
-     * 2. .board 是唯一外层容器，负责白底、阴影和垂直布局。
-     * 3. .topbar 固定高度，展示标题、摘要和品牌。
-     * 4. .brand 与 .bars 只负责 Codeforces 风格标识。
-     * 5. .list 是比赛条目的承载区，高度随内容增长。
-     * 6. .contest 是单场比赛行，使用 CSS 变量注入状态颜色。
-     * 7. .index 用状态强调色展示序号，便于视觉扫描。
-     * 8. .main 承载比赛名称和标签，必须允许文本换行。
-     * 9. .meta 使用 flex-wrap，避免多个标签挤出卡片。
-     * 10. .pill 是通用标签，.pill.phase 使用阶段专属配色。
-     * 11. .side 固定右栏宽度，展示日期、时间和比赛 ID。
-     * 12. .empty 复用列表视觉结构，避免空数据时卡片塌陷。
-     * 13. .footer 放生成时间和水印，短列表时仍贴近卡片底部。
-     * 14. .watermark 是轻量标识，不参与业务信息展示。
-     * 15. 修改任何固定高度后，都要同步 Python 的高度计算常量。
-     * 16. 不要在 CSS 中写比赛阶段判断，阶段逻辑属于 Python 数据层。
-     * 17. 不要移除 overflow-wrap，Codeforces 比赛名可能非常长。
-     * 18. 不要把卡片改成响应式宽度，截图服务需要稳定尺寸。
-     * 19. 颜色保持浅背景深文本，保证聊天图片中的可读性。
-     * 20. 新增视觉元素时优先放在现有网格中，避免增加截图裁剪风险。
-     * 21. 日期栏保持窄宽度，主要信息始终让位给比赛名称。
-     * 22. 标签文本来自 Python 格式化结果，不在模板中拼接单位。
-     * 23. 过长摘要会省略，避免挤压右侧品牌标识。
-     * 24. 状态色同时用于左边框和序号，形成一致的阶段提示。
-     * 25. 列表项之间使用 margin-bottom，不依赖父级 gap，兼容截图服务。
-     * 26. 空状态使用虚线边框，和真实比赛项形成明显区分。
-     * 27. 修改品牌区时要保留 max-width，避免遮挡标题摘要。
-     * 28. 模板内不要添加外链字体，避免截图环境网络波动。
-     * 29. 所有颜色值都应保持足够对比度，优先照顾聊天窗口缩略图。
-     * 30. 如需新增移动端样式，应新建模板，不要影响固定截图模板。
-     */
-    /* 基础画布：固定宽度，避免 AstrBot 截图时因视口变化导致布局漂移。 */
     * { box-sizing: border-box; }
     html {
       width: {{ width }}px;
@@ -460,7 +393,6 @@ class ContestCardRenderer:
     </div>
 
     <div class="footer">
-      <!-- 页脚区：展示生成时间和项目水印。 -->
       <span>{{ generated_at }}</span>
       <span class="watermark" aria-label="GitHub watermark">
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -492,7 +424,6 @@ class ContestCardRenderer:
             "contests": contest_items,
         }
         options = {
-            # 不使用 clip。clip 会固定图片高度，比赛名称或标签换行时容易被截断。
             "full_page": True,
             "type": "png",
             "animations": "disabled",
@@ -500,8 +431,6 @@ class ContestCardRenderer:
             "scale": "css",
             "timeout": 30000,
 
-            # AstrBot 文转图服务支持这些参数，用于稳定卡片宽度。
-            # full_page 会让图片高度跟随实际 DOM 内容。
             "viewport_width": self.WIDTH,
             "viewport_height": max(720, min_height),
             "device_scale_factor_level": "high",

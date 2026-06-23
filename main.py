@@ -1,53 +1,4 @@
-# main.py
-"""
-AstrBot 插件入口模块。
-
-本文件负责把各个业务模块接入 AstrBot：
-- 用户资料查询命令调用 user_handle。
-- 比赛查询和比赛卡片渲染调用 contests。
-- 用户绑定、播报开关和指纹记录调用 storage。
-- 自动比赛推送和 AC 播报调用 automation。
-
-入口层尽量只做参数解析、权限判断、消息发送和异常回退。
-真实的 HTTP 请求、数据库操作和卡片数据构造都下沉到独立模块，避免命令函数过重。
-
-维护要点：
-- initialize 负责启动后台任务，terminate 负责按相反方向释放资源。
-- 命令函数是 AstrBot 的交互边界，所有用户输入都要在这里校验。
-- /cf 和 /比赛 优先渲染图片，渲染失败时回退为纯文本。
-- 绑定类命令只允许群聊使用，因为绑定关系包含会话维度。
-- 管理员命令只改变内存中的 enable 开关，不改写配置文件。
-- 自动推送模块通过 enable_getter 读取 enable，能即时响应开关变化。
-- html_render 可能返回非图片路径，因此发送前必须验证文件头。
-- t2i 临时文件清理只删除 AstrBot 临时目录下的目标文件名模式。
-- 任何涉及会话 ID 的逻辑都应使用 unified_msg_origin。
-- 发送自动消息时不依赖原始事件对象，只使用 session_id。
-- 数据库路径固定在插件数据目录，避免污染插件代码目录。
-- 用户可见错误尽量简短，详细原因保留在日志中。
-- Codeforces API 查询失败不应让命令抛出未捕获异常。
-- 卡片渲染失败不影响核心查询结果，只影响展示形式。
-- 指纹测试命令会暴露内部去重状态，因此只开放给管理员。
-- 新增命令时优先复用 GetArgs 解析文本参数。
-- 新增图片渲染能力时要复用 _is_rendered_image_file 校验。
-- 关闭插件时先停止后台任务，再关闭数据库连接。
-- 命令函数中不要直接操作 SQLite，同步/异步封装都在 storage 模块。
-- 入口层不保存 Codeforces 原始 JSON，只传递内部结果模型。
-- 修改配置字段名时需要同步 _conf_schema.json 和这里的读取路径。
-- 自动推送和手动查询共享同一套比赛卡片渲染器。
-- 自动推送文本回调用于提交播报和比赛卡片失败兜底。
-- 日志信息用于排查远端 API、渲染服务和数据库状态。
-- 这里的注释以流程边界为主，避免重复解释下层模块内部实现。
-- 用户命令通常使用 yield 返回 AstrBot 结果，后台回调直接调用 context 发送。
-- 群聊命令读取 session_id，不直接假设 group_id 是纯数字群号。
-- 绑定前先查 Codeforces 用户是否存在，避免无效 handle 进入数据库。
-- 数据库仍保留唯一约束，用于兜底并发场景下的重复绑定。
-- enable 开关只阻止命令和自动轮询，不销毁已经创建的后台任务。
-- 比赛自动推送的图片失败时，仍会发送 build_contest_message 文本。
-- 用户资料卡片失败时，仍会发送 user.info 返回的 message。
-- terminate 中忽略清理任务的 CancelledError，属于正常关闭流程。
-- 不同命令的参数数量校验尽量在远端 API 请求前完成。
-- 这里不做 Codeforces API 节流，自动任务节流在 automation 模块中实现。
-"""
+"""AstrBot 插件入口，负责命令注册、参数校验和消息发送。"""
 import asyncio
 from pathlib import Path
 import sqlite3
@@ -85,10 +36,8 @@ class PluginForXCPC(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        # 配置项实例化
         self.config = config
 
-        # 配置参数实例化
         self.loop_time = config["loop_time"]
         
         self.admin_id = config["admin_setting"]["Admin ID"]
@@ -98,17 +47,14 @@ class PluginForXCPC(Star):
         self.contest_number = config["contest_setting"]["contest_number"]
         self.contest_push_time = config["contest_setting"]["contest_push_time"]
         self.contest_push_sessions = config["contest_setting"]["contest_push_sessions"]
-        # t2i 临时文件清理任务在 initialize 中启动，terminate 中取消。
         self._t2i_cleanup_task: asyncio.Task | None = None
 
-        # 模块类实例化
         self.user_info_handler = UserInfoHandler()
         self.user_card_renderer = UserProfileCardRenderer()
         self.user_status_handler = UserStatusHandler()
         self.contest_info_handler = ContestInfoHandler()
         self.contest_card_renderer = ContestCardRenderer()
         self.user_db_handler = DataStorageHandler(db_path=self._build_user_db_path())
-        # 自动化模块通过回调发送消息，避免直接依赖 AstrBot 事件对象。
         self.automation_push_handler = AutomationPushHandler(
             user_status_handler=self.user_status_handler,
             contest_info_handler=self.contest_info_handler,
@@ -152,8 +98,7 @@ class PluginForXCPC(Star):
         )
 
     async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-        # 启动前先清理一次历史 t2i 文件，再创建长期清理任务。
+        """启动后台任务。"""
         await self._cleanup_t2i_temp_files()
         self._t2i_cleanup_task = asyncio.create_task(self._t2i_cleanup_loop())
         await self.automation_push_handler.start()
@@ -201,9 +146,7 @@ class PluginForXCPC(Star):
             logger.info(f"已清理 {deleted_count} 个 t2i 临时文件，释放 {deleted_size} 字节")
 
     async def _send_automation_message(self, session_id: str, message: str) -> None:
-        """
-        回调：发送自动化模块生成的纯文本消息。
-        """
+        """发送自动化模块生成的纯文本消息。"""
         logger.info("执行自动信息回调")
         await self.context.send_message(session_id, MessageChain().message(message))
 
@@ -239,7 +182,6 @@ class PluginForXCPC(Star):
         """参数解析逻辑"""
         args = []
         for msg in messages:
-            # @ 消息不参与命令参数解析，只解析纯文本片段。
             if isinstance(msg, At):
                 continue
             if isinstance(msg, Plain):
@@ -248,7 +190,6 @@ class PluginForXCPC(Star):
                     args.extend(text.split())
         return args
     
-    # 用户 / 管理员指令区
     @filter.command("cf", alias={"CF", "cF", "Cf"})
     async def GetCodeforcesUserInfo(self, event: AstrMessageEvent):
         """查询指定 Codeforces 用户信息"""
@@ -269,7 +210,6 @@ class PluginForXCPC(Star):
 
         result = await self.user_info_handler.UserInfoRequest(user_handle)
         if not result.ok or result.profile is None:
-            # API 失败直接把错误文本回给用户，不进入卡片渲染流程。
             logger.warning(result.message)
             yield event.plain_result(result.message)
             return
@@ -277,7 +217,6 @@ class PluginForXCPC(Star):
         try:
             template, data, options = self.user_card_renderer.build(result.profile)
             card_path = await self.html_render(template, data, return_url=False, options=options)
-            # html_render 异常时可能返回非图片路径，发送前必须做文件头校验。
             if not self._is_rendered_image_file(card_path):
                 raise ValueError(
                     f"AstrBot HTML 渲染返回的文件不是图片: {card_path}，"
@@ -301,7 +240,6 @@ class PluginForXCPC(Star):
         result = await self.contest_info_handler.ContestInfoRequest(self.contest_number)
         logger.info(result.message)
 
-        # 文本消息同时作为渲染失败时的兜底内容。
         message_chain = self.automation_push_handler.build_contest_message(result)
 
         if not result.ok or result.contests is None:
@@ -325,7 +263,6 @@ class PluginForXCPC(Star):
             logger.warning("插件功能被阻止，无法使用 /绑定 指令")
             return
 
-        # 用户信息获取
         user_id = event.get_sender_id()
         group_id = self._get_event_session_id(event)
         messages = event.get_messages()
@@ -339,21 +276,18 @@ class PluginForXCPC(Star):
         cf_handle = args[1]
         logger.info(f"用户 {user_id} 尝试在群聊 {group_id} 绑定 cf 用户 {cf_handle}")
 
-        # 判断用户输入的 cf handle 是否有效
         handle_result = await self.user_info_handler.UserInfoRequest(cf_handle)
         if handle_result.ok is False:
             logger.warning(f"请求出错！原因：{handle_result.message}")
             yield event.plain_result(f"请求出错！原因：{handle_result.message}")
             return
         
-        # 判断该 cf handle 是否被其他用户绑定
         existing = await self.user_db_handler.aget_group_binding_by_handle(group_id, cf_handle)
         if existing is not None and existing.user_id != str(user_id):
             logger.info(f"检测到 {existing.cf_handle} 已经被 {existing.user_id} 绑定")
             yield event.plain_result("该 Codeforces 用户已被本群其他用户绑定")
             return
 
-        # 调用数据库类方法，修改用户绑定信息
         try:
             # 数据库唯一约束是最后一道防线，避免并发绑定同一 handle。
             await self.user_db_handler.abind_user(user_id, group_id, cf_handle, None)
@@ -374,7 +308,6 @@ class PluginForXCPC(Star):
             logger.warning("插件功能被阻止，无法使用 /解绑 指令")
             return
         
-        # 用户信息获取
         user_id = event.get_sender_id()
         group_id = self._get_event_session_id(event)
 
@@ -395,11 +328,9 @@ class PluginForXCPC(Star):
             logger.warning("插件功能被阻止，无法使用 /查询绑定 指令")
             return
         
-        # 用户信息获取
         user_id = event.get_sender_id()
         group_id = self._get_event_session_id(event)
         
-        # 获取用户绑定信息
         result = await self.user_db_handler.aget_binding(user_id, group_id)
 
         if result is None:
@@ -419,11 +350,9 @@ class PluginForXCPC(Star):
             logger.warning("插件功能被阻止，无法使用 /显示记录 指令")
             return
         
-        # 用户信息获取
         user_id = event.get_sender_id()
         group_id = self._get_event_session_id(event)
 
-        # 调用数据库类方法，修改用户过题记录可见性
         result = await self.user_db_handler.aset_broadcast_enabled(user_id, group_id, True)
 
         if result is None:
@@ -443,11 +372,9 @@ class PluginForXCPC(Star):
             logger.warning("插件功能被阻止，无法使用 /隐藏记录 指令")
             return
         
-        # 用户信息获取
         user_id = event.get_sender_id()
         group_id = self._get_event_session_id(event)
 
-        # 调用数据库类方法，修改用户过题记录可见性
         result = await self.user_db_handler.aset_broadcast_enabled(user_id, group_id, False)
 
         if result is None:
@@ -458,15 +385,12 @@ class PluginForXCPC(Star):
         logger.info(f"用户 {user_id} 在群 {group_id} 中关闭过题记录播报成功")
         yield event.plain_result("已关闭过题记录播报")
 
-
-    # 管理员指令区
     @filter.command("enable_cf")
     async def EnablePlugin(self, event: AstrMessageEvent):
         """启用插件功能，仅配置的管理员 ID 可调用"""
         user_id = event.get_sender_id()
         logger.info(f"用户 {user_id} 尝试启用插件总开关")
         if user_id not in self.admin_id:
-            # 管理员命令不回显具体原因，减少普通用户误触时的噪声。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
         if self.enable is True:
@@ -483,7 +407,6 @@ class PluginForXCPC(Star):
         user_id = event.get_sender_id()
         logger.info(f"用户 {user_id} 尝试关闭插件总开关")
         if user_id not in self.admin_id:
-            # 管理员命令不回显具体原因，减少普通用户误触时的噪声。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
         if self.enable is False:
@@ -495,7 +418,7 @@ class PluginForXCPC(Star):
         logger.info("插件总开关已经关闭")
 
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        """停止后台任务并关闭数据库连接。"""
         if self._t2i_cleanup_task:
             # 先停清理任务，再停自动推送和数据库连接，避免后台任务继续访问已关闭资源。
             self._t2i_cleanup_task.cancel()
@@ -517,7 +440,6 @@ class PluginForXCPC(Star):
         
         user_id = event.get_sender_id()
         if user_id not in self.admin_id:
-            # 指纹测试命令会暴露内部状态，只允许管理员使用。
             logger.warning(f"用户 {user_id} 无权执行该操作，退出")
             return
 
@@ -543,7 +465,6 @@ class PluginForXCPC(Star):
             return
 
         fingerprint = self.automation_push_handler._build_submission_fingerprint(status)
-        # 该命令用于排查自动播报去重问题，因此直接展示当前指纹和已记录指纹。
         logger.info(
             f"用户 {user_id} 在群 {group_id} 查询 {binding.cf_handle} 最新提交指纹: {fingerprint}"
         )
