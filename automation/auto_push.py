@@ -375,10 +375,14 @@ class AutomationPushHandler:
 
         if problem.contestId is not None:
             contest_id = str(problem.contestId)
-            contest_type = "contest" if len(contest_id) == 4 else "gym"
-            problem_url = (
-                f"https://codeforces.com/{contest_type}/{contest_id}/problem/{problem.index}"
-            )
+            if len(contest_id) == 4:
+                problem_url = (
+                    f"https://codeforces.com/problemset/problem/{contest_id}/{problem.index}"
+                )
+            else:
+                problem_url = (
+                    f"https://codeforces.com/gym/{contest_id}/problem/{problem.index}"
+                )
         else:
             problem_url = "https://codeforces.com/problemset"
         submit_time = datetime.datetime.fromtimestamp(

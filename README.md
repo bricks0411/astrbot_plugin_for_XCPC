@@ -452,7 +452,7 @@
 
   ### v0.0.2
 
-  - 修复 AC 播报中 Gym 题目链接错误的问题，支持根据 `contestId` 位数生成 `/contest/` 或 `/gym/` 链接。
+  - 修复 AC 播报中 Gym 题目链接错误的问题，支持根据 `contestId` 位数生成 `/problemset/problem/` 或 `/gym/` 链接。
   - 修复 `contestId` 为整数时直接调用 `len()` 导致自动播报异常的问题。
   - 保持比赛查询与比赛定时推送逻辑不变，继续只展示 Codeforces API 返回的普通 contest 数据。
 
