@@ -1,36 +1,4 @@
-# user_handle/user_card.py
-"""
-Codeforces 用户资料卡片渲染模块。
-
-该模块把 CodeforcesUserProfile 转换为 html_render 可用的模板数据。
-卡片尺寸固定为 760x430，适合在聊天窗口中直接展示，不依赖用户端缩放。
-
-模板中的颜色由用户 rank 决定：
-- accent 用于边条、头像底色、Rating 数字等强视觉元素。
-- tint 用于卡片背景渐变，保持不同等级可区分但不过度花哨。
-
-维护要点：
-- OPTIONS.clip 固定输出尺寸，CSS 的 html/body/card 尺寸要与之匹配。
-- rank 主题集中在 RANK_THEME，模板中只消费 accent 和 tint。
-- avatar 优先使用 titlePhoto，其次 avatar，最后使用 handle 缩写兜底。
-- 所有文本字段进入模板前都要经过 _escape。
-- handle、rank、指标值都设置省略号，避免长文本溢出卡片。
-- metrics 固定四项，保证卡片信息密度稳定。
-- contribution 使用带符号格式，更贴近 Codeforces 页面展示。
-- lastOnlineTimeSeconds 可能缺失，缺失时展示 unknown。
-- 头像 URL 可能是协议相对地址，必须在 _normalize_avatar 中补全。
-- 该模块只生成渲染数据，不处理 API 请求和消息发送。
-- 修改卡片尺寸时需要同步 OPTIONS.clip、html/body 和 .card。
-- 修改指标数量时需要同步 .metrics 网格和 build 中的 metrics 列表。
-- 新增 rank 时只需扩展 RANK_THEME，不需要改模板结构。
-- 未知 rank 会回退到灰色主题，避免新等级导致渲染失败。
-- 内联 GitHub SVG 避免外部静态资源依赖。
-- 模板注释只用于维护结构说明，不承载业务逻辑。
-- 背景渐变保持浅色，防止深色主题影响文字可读性。
-- 字体使用系统字体栈，优先兼容 Windows 和常见中文环境。
-- 该卡片用于聊天场景，固定尺寸比响应式布局更稳定。
-- 渲染失败由 main.py 兜底为纯文本消息。
-"""
+"""Codeforces 用户资料卡片渲染数据构造。"""
 from __future__ import annotations
 
 import datetime
@@ -58,40 +26,6 @@ class UserProfileCardRenderer:
 <head>
   <meta charset="utf-8" />
   <style>
-    /*
-     * 用户卡片样式维护地图：
-     * 1. html/body 与 OPTIONS.clip 共同决定最终图片尺寸。
-     * 2. .card 是唯一主容器，负责圆角、阴影和等级背景。
-     * 3. .stripe 使用 rank 强调色，快速传达用户等级。
-     * 4. .brand 与 .bars 只负责 Codeforces 风格标识。
-     * 5. .avatar 优先展示图片，缺失时展示 handle 缩写。
-     * 6. .identity 放 handle 和 rank，长文本必须截断。
-     * 7. .rating-block 是主视觉区，突出当前 rating。
-     * 8. .metrics 是 2x2 指标网格，保持固定信息密度。
-     * 9. .metric 内部标签和值都要截断，避免破坏卡片边界。
-     * 10. .watermark 固定右下角，不抢占用户信息区域。
-     * 11. 修改卡片尺寸时必须同步 clip、html/body、.card 三处。
-     * 12. 修改指标数量时必须同步 metrics 网格布局。
-     * 13. rank 配色从 Python 数据注入，CSS 不判断 rank 名称。
-     * 14. 头像图片使用 object-fit:cover，保证不同尺寸头像都能填满。
-     * 15. 所有固定定位都服务于截图稳定性，不适合改成流式布局。
-     * 16. 背景保持浅色，避免彩色等级主题影响文字对比度。
-     * 17. 字体栈优先兼容 Windows 中文环境和常见浏览器。
-     * 18. SVG 水印内联在模板中，避免外链资源加载失败。
-     * 19. 不要移除 overflow:hidden，聊天图片中溢出会很明显。
-     * 20. 新增字段时优先放入 metrics，不要挤压 handle 区域。
-     * 21. rating 数字使用大字号，是整张卡片的主视觉锚点。
-     * 22. rank 胶囊高度固定，避免不同 rank 文本导致布局跳动。
-     * 23. 指标标签使用较小字号，值使用较大字号，便于快速扫描。
-     * 24. 头像区域不显示 alt 文本，图片失败时由 Python 兜底生成缩写。
-     * 25. 不要在模板中访问 profile 字段，模板只消费已整理的 data。
-     * 26. 修改间距时要同时检查 handle、rank 和品牌区是否重叠。
-     * 27. 浅色 tint 只做背景气氛，不承担状态判断。
-     * 28. 贡献值和关注数属于辅助指标，不应抢占 rating 主视觉。
-     * 29. 未知字段统一展示短占位，避免长错误文本进入卡片。
-     * 30. 如需展示更多资料，优先扩展新卡片而不是压缩现有布局。
-     */
-    /* 固定画布尺寸，配合 OPTIONS.clip 输出稳定大小的图片。 */
     * { box-sizing: border-box; }
     html, body {
       width: 760px;
@@ -103,7 +37,6 @@ class UserProfileCardRenderer:
       color: #172033;
     }
     .card {
-      /* 主卡片保留 20px 外边距，避免阴影被截图裁掉。 */
       position: relative;
       width: 720px;
       height: 390px;
@@ -121,7 +54,6 @@ class UserProfileCardRenderer:
       background: {{ accent }};
     }
     .brand {
-      /* 右上角品牌标识保持固定位置，不参与主体信息排版。 */
       position: absolute;
       top: 26px;
       right: 34px;
@@ -146,7 +78,6 @@ class UserProfileCardRenderer:
     .brand .forces { color: #2d6cdf; }
 
     .avatar {
-      /* 头像优先展示远端图片，缺失时使用 handle 前两位作为占位。 */
       position: absolute;
       left: 54px;
       top: 62px;
@@ -170,7 +101,6 @@ class UserProfileCardRenderer:
       display: block;
     }
     .identity {
-      /* 用户身份区展示 handle 和 rank，长 handle 会省略号截断。 */
       position: absolute;
       left: 202px;
       top: 70px;
@@ -202,7 +132,6 @@ class UserProfileCardRenderer:
       text-overflow: ellipsis;
     }
     .rating-block {
-      /* Rating 是卡片主信息，放在左下区域并使用等级强调色。 */
       position: absolute;
       left: 54px;
       bottom: 56px;
@@ -238,7 +167,6 @@ class UserProfileCardRenderer:
       text-overflow: ellipsis;
     }
     .metrics {
-      /* 四个指标使用 2x2 网格，保证信息密度和可读性平衡。 */
       position: absolute;
       right: 34px;
       bottom: 62px;
@@ -276,7 +204,6 @@ class UserProfileCardRenderer:
       text-overflow: ellipsis;
     }
     .watermark {
-      /* 水印固定在右下角，避免和指标区抢占视觉层级。 */
       position: absolute;
       right: 34px;
       bottom: 20px;
@@ -319,14 +246,12 @@ class UserProfileCardRenderer:
 </head>
 <body>
   <div class="card">
-    <!-- 装饰边条和品牌区：体现 Codeforces 身份，不承载业务数据。 -->
     <div class="stripe"></div>
     <div class="brand">
       <span class="bars"><i></i><i></i><i></i></span>
       <span><span class="code">Code</span><span class="forces">Forces</span></span>
     </div>
 
-    <!-- 主体身份区：头像、handle、rank 和当前 rating。 -->
     <div class="avatar">{{ avatar_content }}</div>
 
     <div class="identity">
@@ -341,7 +266,6 @@ class UserProfileCardRenderer:
     </div>
 
     <div class="metrics">
-      <!-- 指标区：最高 rating、贡献、关注数和最近在线时间。 -->
       {% for item in metrics %}
       <div class="metric">
         <div class="label">{{ item.label }}</div>
@@ -403,8 +327,6 @@ class UserProfileCardRenderer:
         return cls.RANK_THEME.get((rank or "unrated").casefold(), ("#64748b", "#f8fafc"))
 
     def _avatar_content(self, profile: CodeforcesUserProfile) -> str:
-        # Codeforces API 同时提供 avatar 和 titlePhoto。
-        # titlePhoto 通常更清晰，因此优先用于卡片头像。
         avatar = self._normalize_avatar(
             getattr(profile, "title_photo", None)
             or getattr(profile, "titlePhoto", None)
