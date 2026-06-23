@@ -448,6 +448,18 @@
   - 用户切换绑定的 Codeforces handle 后，最近 AC 指纹会重置。
   - t2i 图片清理只处理 `io_temp_img_*`，不会清理其它 AstrBot 临时文件。
 
+  ## 版本迭代历史
+
+  ### v0.0.2
+
+  - 修复 AC 播报中 Gym 题目链接错误的问题，支持根据 `contestId` 位数生成 `/contest/` 或 `/gym/` 链接。
+  - 修复 `contestId` 为整数时直接调用 `len()` 导致自动播报异常的问题。
+  - 保持比赛查询与比赛定时推送逻辑不变，继续只展示 Codeforces API 返回的普通 contest 数据。
+
+  ### v0.0.1
+
+  - 初始版本，支持 Codeforces 用户信息查询、比赛查询、账号绑定、AC 播报、比赛定时推送与图片卡片渲染。
+
   ## License
 
   本项目基于 GNU Affero General Public License v3.0 发布。
